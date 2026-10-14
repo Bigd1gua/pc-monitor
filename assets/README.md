@@ -17,6 +17,35 @@ Store reusable font files and generated font sources in `fonts/`.
 - Check Flash and internal-RAM impact before adding a font; the ESP32-C3 has no PSRAM.
 - Do not commit fonts whose license does not permit redistribution.
 
+### Generated Chinese UI subsets
+
+The PC status monitor (`main/app_pcmon.c`) renders a few Chinese words. The default
+Montserrat fonts have no Chinese glyphs, so these subsets were generated from
+[Source Han Sans SC](https://github.com/adobe-fonts/source-han-sans) (Normal), which is
+distributed under the SIL Open Font License 1.1. The OTF itself is **not** committed; it
+ships with LVGL at `managed_components/lvgl__lvgl/scripts/built_in_font/SourceHanSansSC-Normal.otf`.
+
+| File | Coverage | Use |
+| --- | --- | --- |
+| [`fonts/app_font_14.c`](fonts/app_font_14.c) | ASCII `0x20-0x7E` + 23 Chinese code points, 14 px, 4 bpp | Page titles (top bar). |
+| [`fonts/app_font_20.c`](fonts/app_font_20.c) | Same coverage, 20 px, 4 bpp | Medium Chinese values (AGENT page `psutil` flag). |
+| [`fonts/app_font_40.c`](fonts/app_font_40.c) | Same coverage, 40 px, 4 bpp | Large Chinese status word on the AGENT page. |
+
+- Character inventory (Unicode): `U+6838 U+5FC3 U+5904 U+7406 U+5668 U+5185 U+5B58 U+78C1 U+76D8 U+7F51 U+7EDC U+8D8B U+52BF U+7CFB U+7EDF U+4EE3 U+672A U+8FDE U+63A5 U+6B63 U+5E38 U+662F U+5426`.
+- Generator: [`lv_font_conv`](https://github.com/lvgl/lv_font_conv) 1.5.3 on Node.js v20.12.0.
+- Regeneration (from the repository root; repeat for each size):
+
+  ```bash
+  npx lv_font_conv@1.5.3 \
+    --font managed_components/lvgl__lvgl/scripts/built_in_font/SourceHanSansSC-Normal.otf \
+    --range 0x20-0x7E,0x6838,0x5FC3,0x5904,0x7406,0x5668,0x5185,0x5B58,0x78C1,0x76D8,0x7F51,0x7EDC,0x8D8B,0x52BF,0x7CFB,0x7EDF,0x4EE3,0x672A,0x8FDE,0x63A5,0x6B63,0x5E38,0x662F,0x5426 \
+    --size 14 --bpp 4 --format lvgl --no-compress \
+    --lv-font-name app_font_14 --lv-include lvgl.h \
+    --output assets/fonts/app_font_14.c
+  ```
+
+- Flash (from `idf.py size-files`): 14 px 8417 B, 20 px 13362 B, 40 px 41641 B; 0 B static RAM (bitmaps are read from Flash). Extend the code-point inventory before adding new Chinese text, then regenerate every affected size.
+
 ## Images
 
 Store reusable source images and generated display assets in `images/`.

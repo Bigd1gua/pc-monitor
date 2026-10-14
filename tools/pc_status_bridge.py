@@ -1,0 +1,319 @@
+#!/usr/bin/env python3
+"""PC status bridge for the FoloToy AI Passport "PC monitor" application.
+
+The device is the request initiator: it periodically writes the frame
+``$REQ#`` over its USB serial (USB Serial/JTAG) port. This script watches that
+port and answers each request with a status frame::
+
+    $PCSTAT,cpu=..,ccnt=..,c0=..,...,mem=..,mused=..,mtotal=..,..,host=..,os=..#\\n
+
+It also announces itself with ``$PCAGENT,ver=2,psutil=1#`` on connect (and
+periodically) so the device can show whether the host agent is running.
+
+Usage:
+    pip install pyserial psutil
+    python tools/pc_status_bridge.py                 # run as a reconnecting daemon
+    python tools/pc_status_bridge.py --port COM5     # pick a port explicitly
+    python tools/pc_status_bridge.py --once          # print one local sample
+
+By default the script runs as a daemon: it auto-detects the device, answers it,
+and keeps running. Unplugging and re-plugging the device (or a port change) is
+recovered automatically, so the only user action is connecting the USB cable.
+
+psutil is strongly recommended: without it only host, OS, and uptime are sent.
+"""
+
+from __future__ import annotations
+
+import argparse
+import getpass
+import platform
+import socket
+import sys
+import time
+
+try:
+    import serial
+    from serial.tools import list_ports
+except ImportError:  # pragma: no cover
+    print("pyserial is required: pip install pyserial", file=sys.stderr)
+    raise SystemExit(1)
+
+try:
+    import psutil
+except ImportError:  # pragma: no cover
+    psutil = None
+
+ESP_VID = 0x303A
+PROTO_VER = 2
+PCMON_MAX_FIELD = 31
+PCMON_CORES_MAX = 8
+AGENT_PERIOD_S = 5.0
+
+
+def sanitize(text: str) -> str:
+    return text.replace(",", "_").replace("#", "_").strip()[:PCMON_MAX_FIELD]
+
+
+class PortUnavailable(Exception):
+    """No usable serial port is currently present."""
+
+
+def detect_port(explicit: str | None) -> str:
+    if explicit:
+        return explicit
+    ports = list(list_ports.comports())
+    for port in ports:
+        if port.vid == ESP_VID:
+            return port.device
+    if len(ports) == 1:
+        return ports[0].device
+    if not ports:
+        raise PortUnavailable(
+            "no serial port found; connect the device with a data-capable USB cable"
+        )
+    listing = ", ".join(f"{p.device} ({p.description})" for p in ports)
+    raise PortUnavailable(f"multiple serial ports found; pass --port. Candidates: {listing}")
+
+
+def _cpu_model() -> str:
+    if platform.system() == "Windows":
+        try:
+            import winreg
+
+            key = winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"HARDWARE\DESCRIPTION\System\CentralProcessor\0",
+            )
+            value, _ = winreg.QueryValueEx(key, "ProcessorNameString")
+            return str(value)
+        except Exception:
+            pass
+    return platform.processor() or platform.machine()
+
+
+def _current_user() -> str:
+    if psutil is not None:
+        try:
+            users = psutil.users()
+            if users:
+                return users[0].name
+        except Exception:
+            pass
+    try:
+        return getpass.getuser()
+    except Exception:
+        return ""
+
+
+class Sampler:
+    def __init__(self) -> None:
+        self._last_net = None
+        self._last_net_time = None
+        self._last_disk = None
+        self._last_disk_time = None
+        self.host = sanitize(socket.gethostname())
+        self.os_name = sanitize(f"{platform.system()} {platform.release()}")
+        self.user = sanitize(_current_user())
+        self.cpu_model = sanitize(_cpu_model())
+
+    def _net_rates(self) -> tuple[float, float] | None:
+        counters = psutil.net_io_counters()
+        now = time.monotonic()
+        rates = None
+        if self._last_net is not None and self._last_net_time is not None:
+            dt = now - self._last_net_time
+            if dt > 0:
+                down = (counters.bytes_recv - self._last_net.bytes_recv) / dt
+                up = (counters.bytes_sent - self._last_net.bytes_sent) / dt
+                rates = (max(down, 0.0) / 1024.0, max(up, 0.0) / 1024.0)
+        self._last_net = counters
+        self._last_net_time = now
+        return rates
+
+    def _disk_rates(self) -> tuple[float, float] | None:
+        counters = psutil.disk_io_counters()
+        if counters is None:
+            return None
+        now = time.monotonic()
+        rates = None
+        if self._last_disk is not None and self._last_disk_time is not None:
+            dt = now - self._last_disk_time
+            if dt > 0:
+                read = (counters.read_bytes - self._last_disk.read_bytes) / dt
+                write = (counters.write_bytes - self._last_disk.write_bytes) / dt
+                rates = (max(read, 0.0) / (1024.0 * 1024.0),
+                         max(write, 0.0) / (1024.0 * 1024.0))
+        self._last_disk = counters
+        self._last_disk_time = now
+        return rates
+
+    def sample(self) -> list[tuple[str, str]]:
+        fields: list[tuple[str, str]] = []
+        if psutil is None:
+            fields.append(("up", f"{int(time.monotonic())}"))
+            fields.append(("host", self.host))
+            fields.append(("os", self.os_name))
+            return fields
+
+        fields.append(("cpu", f"{psutil.cpu_percent(interval=None):.1f}"))
+
+        per_cpu = psutil.cpu_percent(interval=None, percpu=True)
+        if per_cpu:
+            fields.append(("ccnt", str(len(per_cpu))))
+            for index, value in enumerate(per_cpu[:PCMON_CORES_MAX]):
+                fields.append((f"c{index}", f"{value:.1f}"))
+
+        freq = psutil.cpu_freq()
+        if freq is not None:
+            fields.append(("freq", f"{freq.current:.0f}"))
+        fields.append(("proc", str(len(psutil.pids()))))
+
+        mem = psutil.virtual_memory()
+        fields.append(("mem", f"{mem.percent:.1f}"))
+        fields.append(("mused", f"{mem.used / (1024**3):.2f}"))
+        fields.append(("mtotal", f"{mem.total / (1024**3):.2f}"))
+
+        swap = psutil.swap_memory()
+        fields.append(("swap", f"{swap.percent:.1f}"))
+        fields.append(("sused", f"{swap.used / (1024**3):.2f}"))
+        fields.append(("stotal", f"{swap.total / (1024**3):.2f}"))
+
+        root = "C:\\" if platform.system() == "Windows" else "/"
+        disk = psutil.disk_usage(root)
+        fields.append(("disk", f"{disk.percent:.1f}"))
+        fields.append(("dused", f"{disk.used / (1024**3):.2f}"))
+        fields.append(("dtotal", f"{disk.total / (1024**3):.2f}"))
+        disk_rates = self._disk_rates()
+        if disk_rates is not None:
+            fields.append(("dread", f"{disk_rates[0]:.2f}"))
+            fields.append(("dwrite", f"{disk_rates[1]:.2f}"))
+
+        net_rates = self._net_rates()
+        if net_rates is not None:
+            fields.append(("netd", f"{net_rates[0]:.3f}"))
+            fields.append(("netu", f"{net_rates[1]:.3f}"))
+        else:
+            fields.append(("netd", "0.000"))
+            fields.append(("netu", "0.000"))
+        net = psutil.net_io_counters()
+        fields.append(("nrecv", f"{net.bytes_recv / (1024**2):.1f}"))
+        fields.append(("nsent", f"{net.bytes_sent / (1024**2):.1f}"))
+
+        temp = self._cpu_temp()
+        if temp is not None:
+            fields.append(("temp", f"{temp:.1f}"))
+
+        fields.append(("up", f"{int(time.time() - psutil.boot_time())}"))
+
+        battery = psutil.sensors_battery() if hasattr(psutil, "sensors_battery") else None
+        if battery is not None:
+            fields.append(("bat", f"{battery.percent:.1f}"))
+            fields.append(("bplug", "1" if battery.power_plugged else "0"))
+            left = battery.secsleft
+            if left is None or left < 0:
+                fields.append(("btime", "-1"))
+            else:
+                fields.append(("btime", str(int(left))))
+
+        fields.append(("host", self.host))
+        fields.append(("os", self.os_name))
+        if self.user:
+            fields.append(("user", self.user))
+        if self.cpu_model:
+            fields.append(("cmodel", self.cpu_model))
+        return fields
+
+    def _cpu_temp(self) -> float | None:
+        if not hasattr(psutil, "sensors_temperatures"):
+            return None
+        try:
+            sensors = psutil.sensors_temperatures()
+        except (AttributeError, OSError):
+            return None
+        for entries in (sensors or {}).values():
+            for entry in entries:
+                if entry.current:
+                    return float(entry.current)
+        return None
+
+
+def build_frame(fields: list[tuple[str, str]]) -> bytes:
+    body = ",".join(f"{key}={value}" for key, value in fields)
+    return f"$PCSTAT,{body}#\n".encode("ascii", errors="ignore")
+
+
+def build_agent_frame() -> bytes:
+    psutil_flag = 1 if psutil is not None else 0
+    return f"$PCAGENT,ver={PROTO_VER},psutil={psutil_flag}#\n".encode("ascii")
+
+
+def serve(port: str, sampler: Sampler) -> None:
+    """Answer requests until the link drops (raises serial.SerialException)."""
+    print(f"Connecting to {port} ...", file=sys.stderr)
+    with serial.Serial(port, 115200, timeout=0.5) as ser:
+        print("Connected. Answering $REQ# frames.", file=sys.stderr)
+        ser.write(build_agent_frame())
+        ser.write(build_frame(sampler.sample()))
+        last_agent = time.monotonic()
+        while True:
+            line = ser.readline()
+            now = time.monotonic()
+            if line and b"$REQ#" in line:
+                ser.write(build_frame(sampler.sample()))
+            elif now - last_agent >= AGENT_PERIOD_S:
+                ser.write(build_agent_frame())
+                last_agent = now
+
+
+def run(sampler: Sampler, explicit_port: str | None, delay: float) -> None:
+    """Reconnecting daemon: plug the device in and it just works."""
+    print("Watching for the device. Plug it in; Ctrl+C to stop.", file=sys.stderr)
+    while True:
+        try:
+            port = detect_port(explicit_port)
+        except PortUnavailable as exc:
+            print(f"Waiting: {exc}", file=sys.stderr)
+            time.sleep(delay)
+            continue
+        try:
+            serve(port, sampler)
+            print("Link closed; reconnecting ...", file=sys.stderr)
+        except serial.SerialException as exc:
+            print(f"Link lost ({exc}); reconnecting ...", file=sys.stderr)
+        time.sleep(delay)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="FoloToy AI Passport PC status bridge")
+    parser.add_argument("--port", help="serial port of the device (default: auto-detect)")
+    parser.add_argument("--once", action="store_true", help="print one sample and exit")
+    parser.add_argument(
+        "--delay",
+        type=float,
+        default=2.0,
+        help="seconds between reconnect attempts (default: 2.0)",
+    )
+    args = parser.parse_args()
+
+    sampler = Sampler()
+    if args.once:
+        sys.stdout.write(build_frame(sampler.sample()).decode("ascii"))
+        return 0
+
+    if psutil is None:
+        print(
+            "Warning: psutil not installed; sending host/OS/uptime only. "
+            "Install with 'pip install psutil' for full metrics.",
+            file=sys.stderr,
+        )
+
+    try:
+        run(sampler, args.port, args.delay)
+    except KeyboardInterrupt:
+        print("Stopped.", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

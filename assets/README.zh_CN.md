@@ -15,6 +15,34 @@
 - 添加字库前评估 Flash 与内部 RAM 影响；ESP32-C3 无 PSRAM。
 - 不提交许可不允许分发的字库。
 
+### 生成的界面中文子集
+
+PC 状态监控应用(`main/app_pcmon.c`)会显示少量中文。默认 Montserrat 字库不含中文
+字形,故基于[思源黑体 Source Han Sans SC](https://github.com/adobe-fonts/source-han-sans)
+(Normal,采用 SIL Open Font License 1.1 许可)生成以下子集。源 OTF **不提交**,随 LVGL
+提供,位于 `managed_components/lvgl__lvgl/scripts/built_in_font/SourceHanSansSC-Normal.otf`。
+
+| 文件 | 覆盖范围 | 用途 |
+| --- | --- | --- |
+| [`fonts/app_font_14.c`](fonts/app_font_14.c) | ASCII `0x20-0x7E` + 23 个中文字码,14 px,4 bpp | 页面标题(如 `核心`、`内存`)。 |
+| [`fonts/app_font_20.c`](fonts/app_font_20.c) | 同上覆盖,20 px,4 bpp | 中等字号中文取值(AGENT 页 `psutil` 项)。 |
+| [`fonts/app_font_40.c`](fonts/app_font_40.c) | 同上覆盖,40 px,4 bpp | AGENT 页大号中文状态词。 |
+
+- 字符清单(Unicode):`U+6838 U+5FC3 U+5904 U+7406 U+5668 U+5185 U+5B58 U+78C1 U+76D8 U+7F51 U+7EDC U+8D8B U+52BF U+7CFB U+7EDF U+4EE3 U+672A U+8FDE U+63A5 U+6B63 U+5E38 U+662F U+5426`。
+- 生成工具:[`lv_font_conv`](https://github.com/lvgl/lv_font_conv) 1.5.3,运行于 Node.js v20.12.0。
+- 重新生成(在仓库根目录执行;每个字号各执行一次):
+
+  ```bash
+  npx lv_font_conv@1.5.3 \
+    --font managed_components/lvgl__lvgl/scripts/built_in_font/SourceHanSansSC-Normal.otf \
+    --range 0x20-0x7E,0x6838,0x5FC3,0x5904,0x7406,0x5668,0x5185,0x5B58,0x78C1,0x76D8,0x7F51,0x7EDC,0x8D8B,0x52BF,0x7CFB,0x7EDF,0x4EE3,0x672A,0x8FDE,0x63A5,0x6B63,0x5E38,0x662F,0x5426 \
+    --size 14 --bpp 4 --format lvgl --no-compress \
+    --lv-font-name app_font_14 --lv-include lvgl.h \
+    --output assets/fonts/app_font_14.c
+  ```
+
+- Flash 占用(取自 `idf.py size-files`):14 px 8417 B、20 px 13362 B、40 px 41641 B;静态 RAM 0 B(字形位图直接从 Flash 读取)。新增中文前先扩充字符清单,并重新生成所有受影响的字号。
+
 ## 图片（images）
 
 可复用的源图与生成的显示资产放在 `images/`。
