@@ -52,6 +52,11 @@ agent status (11 pages total).
 - `assets/fonts/` subset Chinese fonts used by the UI
 - `tests/` host tests for the protocol
 
+## Credits
+
+Built with reference to the FoloToy AI Passport project:
+https://github.com/FoloToy/ai-passport
+
 ## License
 
 MIT, Copyright (c) 2026 FoloToy. See [`LICENSE`](LICENSE).

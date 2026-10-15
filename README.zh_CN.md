@@ -49,6 +49,11 @@ Passport 社区的“电脑状态监控”玩法分发。
 - `assets/fonts/` 界面使用的中文子集字体
 - `tests/` 协议主机测试
 
+## 参考
+
+本项目参考 FoloToy AI Passport 项目：
+https://github.com/FoloToy/ai-passport
+
 ## 许可
 
 MIT，Copyright (c) 2026 FoloToy。见 [`LICENSE`](LICENSE)。
