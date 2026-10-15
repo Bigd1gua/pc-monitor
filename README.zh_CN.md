@@ -2,22 +2,22 @@
   <strong>简体中文</strong> · <a href="README.md">English</a>
 </p>
 
-# 电脑状态监控（AI Passport 玩法）
+# 电脑状态监控
 
 把 AI Passport 变成插在电脑旁的迷你仪表盘：设备发出请求，电脑来回答。
 设备通过 USB 串口周期发送 `$REQ#`，电脑端 Bridge 回传实时的 CPU、内存、磁盘、
 网络与显卡状态，以及占用最高的进程和正在监听的端口。数据只在本机读取，
 无需配网。
 
-本分支（`feature/pc-status-monitor`）包含固件应用与电脑端 Bridge。固件通过
-FoloToy AI Passport 社区的“电脑状态监控”玩法分发。
+本仓库包含设备固件应用与喂给它的电脑端 Bridge。固件也通过 FoloToy AI
+Passport 社区的“电脑状态监控”玩法分发。
 
 ## 快速开始
 
 1. 烧录固件。
    - 在社区玩法中直接烧录，或用 ESP-IDF 5.5.3 构建本分支。
 2. 运行电脑端 Bridge（Windows 一键路径）。
-   - 获取代码：`git clone -b feature/pc-status-monitor https://github.com/Bigd1gua/ai-passport.git`
+   - 获取代码：`git clone -b feature/pc-status-monitor https://github.com/Bigd1gua/pc-monitor.git`
    - Bridge 文件：[`tools/pc_status_bridge.py`](tools/pc_status_bridge.py)
    - 先安装依赖：`pip install pyserial psutil`
    - 双击 [`tools/install_bridge.cmd`](tools/install_bridge.cmd) 一键安装并设为登录自启；也可以直接运行 `python tools\pc_status_bridge.py`。

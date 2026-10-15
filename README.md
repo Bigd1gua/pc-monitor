@@ -2,7 +2,7 @@
   <a href="README.zh_CN.md">简体中文</a> · <strong>English</strong>
 </p>
 
-# PC Status Monitor (AI Passport play)
+# PC Monitor
 
 Turn an AI Passport device into a small desktop dashboard for the PC it is
 plugged into. The device asks and the PC answers: the device periodically sends
@@ -10,16 +10,16 @@ plugged into. The device asks and the PC answers: the device periodically sends
 CPU, memory, disk, network and GPU status, plus the busiest processes and the
 ports that are listening. Everything stays local; no network setup is required.
 
-This branch (`feature/pc-status-monitor`) contains the firmware application and
-the PC-side bridge. The published firmware is distributed through the community
-play on the FoloToy AI Passport platform.
+This repository contains the device firmware application and the PC-side bridge
+that feeds it. The firmware is also distributed through the community play on
+the FoloToy AI Passport platform.
 
 ## Quick start
 
 1. Flash the firmware.
    - Use the community play, or build this branch with ESP-IDF 5.5.3.
 2. Run the PC bridge (Windows quick path).
-   - Get the code: `git clone -b feature/pc-status-monitor https://github.com/Bigd1gua/ai-passport.git`
+   - Get the code: `git clone -b feature/pc-status-monitor https://github.com/Bigd1gua/pc-monitor.git`
    - Bridge file: [`tools/pc_status_bridge.py`](tools/pc_status_bridge.py)
    - Install dependencies once: `pip install pyserial psutil`
    - Double-click [`tools/install_bridge.cmd`](tools/install_bridge.cmd) to install it and start it at every logon, or run `python tools\pc_status_bridge.py` directly.
