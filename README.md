@@ -41,7 +41,10 @@ agent status (11 pages total).
 ## Bridge notes
 
 - Requirements: Python 3, `pyserial`, `psutil`. `psutil` is strongly recommended; without it only host, OS and uptime are sent.
-- Options: `--port COMx` to pick a port, `--once` to print one local sample.
+- Options: `--port COMx` to pick a port, `--once` to print one local sample, `--log PATH` to change the log file, `--verbose` for debug detail.
+- Runs a single instance: a second copy exits (and logs why) instead of fighting over the serial port, so restarting the logon task is safe.
+- Writes a rotating log to `%LOCALAPPDATA%\FoloToy\pcmon-bridge.log` on Windows (`~/.local/state/FoloToy/pcmon-bridge.log` elsewhere). The logon task runs the bridge hidden, so this is where to look when the link drops.
+- Uses a serial write timeout, so a wedged link reconnects instead of hanging.
 - GPU data needs NVIDIA `nvidia-smi`; without it the adapter model is still shown via WMI.
 - Uninstall: [`tools/uninstall_bridge.cmd`](tools/uninstall_bridge.cmd) or `install_autostart.ps1 -Remove`.
 

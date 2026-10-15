@@ -38,7 +38,10 @@ Passport 社区的“电脑状态监控”玩法分发。
 ## Bridge 说明
 
 - 依赖：Python 3、`pyserial`、`psutil`。强烈建议安装 `psutil`；缺少时只发送主机、系统与运行时长。
-- 参数：`--port COMx` 指定串口，`--once` 打印一次本机采样。
+- 参数：`--port COMx` 指定串口，`--once` 打印一次本机采样，`--log PATH` 指定日志文件，`--verbose` 输出调试细节。
+- 只允许单实例：再启动一份会直接退出并记录原因，不再抢占串口，因此重启登录任务也是安全的。
+- 日志轮转写入：Windows 为 `%LOCALAPPDATA%\FoloToy\pcmon-bridge.log`（其它平台为 `~/.local/state/FoloToy/pcmon-bridge.log`）。登录任务以隐藏方式运行，链路掉线时就查这里。
+- 串口写带超时，链路卡死会触发重连而不是永久挂起。
 - 显卡数据需要 NVIDIA `nvidia-smi`；缺少时仍通过 WMI 显示型号。
 - 卸载：[`tools/uninstall_bridge.cmd`](tools/uninstall_bridge.cmd) 或 `install_autostart.ps1 -Remove`。
 
