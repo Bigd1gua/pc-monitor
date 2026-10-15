@@ -27,24 +27,24 @@ ships with LVGL at `managed_components/lvgl__lvgl/scripts/built_in_font/SourceHa
 
 | File | Coverage | Use |
 | --- | --- | --- |
-| [`fonts/app_font_14.c`](fonts/app_font_14.c) | ASCII `0x20-0x7E` + 23 Chinese code points, 14 px, 4 bpp | Page titles (top bar). |
+| [`fonts/app_font_14.c`](fonts/app_font_14.c) | ASCII `0x20-0x7E` + 29 Chinese code points, 14 px, 4 bpp | Page titles (top bar). |
 | [`fonts/app_font_20.c`](fonts/app_font_20.c) | Same coverage, 20 px, 4 bpp | Medium Chinese values (AGENT page `psutil` flag). |
 | [`fonts/app_font_40.c`](fonts/app_font_40.c) | Same coverage, 40 px, 4 bpp | Large Chinese status word on the AGENT page. |
 
-- Character inventory (Unicode): `U+6838 U+5FC3 U+5904 U+7406 U+5668 U+5185 U+5B58 U+78C1 U+76D8 U+7F51 U+7EDC U+8D8B U+52BF U+7CFB U+7EDF U+4EE3 U+672A U+8FDE U+63A5 U+6B63 U+5E38 U+662F U+5426`.
+- Character inventory (Unicode): `U+6838 U+5FC3 U+5904 U+7406 U+5668 U+5185 U+5B58 U+78C1 U+76D8 U+7F51 U+7EDC U+8D8B U+52BF U+7CFB U+7EDF U+4EE3 U+672A U+8FDE U+63A5 U+6B63 U+5E38 U+662F U+5426 U+8FDB U+7A0B U+7AEF U+53E3 U+663E U+5361`.
 - Generator: [`lv_font_conv`](https://github.com/lvgl/lv_font_conv) 1.5.3 on Node.js v20.12.0.
 - Regeneration (from the repository root; repeat for each size):
 
   ```bash
   npx lv_font_conv@1.5.3 \
     --font managed_components/lvgl__lvgl/scripts/built_in_font/SourceHanSansSC-Normal.otf \
-    --range 0x20-0x7E,0x6838,0x5FC3,0x5904,0x7406,0x5668,0x5185,0x5B58,0x78C1,0x76D8,0x7F51,0x7EDC,0x8D8B,0x52BF,0x7CFB,0x7EDF,0x4EE3,0x672A,0x8FDE,0x63A5,0x6B63,0x5E38,0x662F,0x5426 \
+    --range 0x20-0x7E,0x6838,0x5FC3,0x5904,0x7406,0x5668,0x5185,0x5B58,0x78C1,0x76D8,0x7F51,0x7EDC,0x8D8B,0x52BF,0x7CFB,0x7EDF,0x4EE3,0x672A,0x8FDE,0x63A5,0x6B63,0x5E38,0x662F,0x5426,0x8FDB,0x7A0B,0x7AEF,0x53E3,0x663E,0x5361 \
     --size 14 --bpp 4 --format lvgl --no-compress \
     --lv-font-name app_font_14 --lv-include lvgl.h \
     --output assets/fonts/app_font_14.c
   ```
 
-- Flash (from `idf.py size-files`): 14 px 8417 B, 20 px 13362 B, 40 px 41641 B; 0 B static RAM (bitmaps are read from Flash). Extend the code-point inventory before adding new Chinese text, then regenerate every affected size.
+- Flash (from `idf.py size-files`): 14 px 9030 B, 20 px 14483 B, 40 px 45629 B; 0 B static RAM (bitmaps are read from Flash). Extend the code-point inventory before adding new Chinese text, then regenerate every affected size.
 
 ## Images
 

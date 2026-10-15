@@ -1,5 +1,6 @@
 #include "app_pcmon.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -32,7 +33,14 @@ LV_FONT_DECLARE(app_font_40);
 #define PCMON_HIST 16
 #define PCMON_EVENT_DEPTH 8
 
-#define PCMON_PAGES 8
+#define PCMON_PAGES 11
+
+// View indices for pages that need extra data from the host agent.
+#define PCMON_VIEW_GPU 7
+#define PCMON_VIEW_PROC 8
+#define PCMON_VIEW_PORT 9
+#define PCMON_PROC_ROWS PCMON_PROC_MAX
+#define PCMON_PORT_ROWS PCMON_PORT_MAX
 
 #define C_BG 0x060A12
 #define C_FRAME 0x16283A
@@ -45,7 +53,7 @@ LV_FONT_DECLARE(app_font_40);
 #define C_RED 0xFF4D6D
 
 static const char *const PAGE_NAMES[PCMON_PAGES] = {
-    "核心", "CPU", "内存", "磁盘", "网络", "趋势", "系统", "代理"};
+    "核心", "CPU", "内存", "磁盘", "网络", "趋势", "系统", "显卡", "进程", "端口", "代理"};
 
 typedef enum {
     PCMON_EV_LINE,
@@ -62,12 +70,16 @@ typedef struct {
 static QueueHandle_t s_queue;
 static pcmon_stats_t s_stats;
 static pcmon_agent_t s_agent;
+static pcmon_proc_list_t s_proc_list;
+static pcmon_port_list_t s_port_list;
+static pcmon_gpu_t s_gpu;
 static int64_t s_last_rx_ms;
 static int64_t s_last_agent_ms;
 static int s_rx_frames;
 static int s_tx_frames;
 static bool s_paused;
 static int s_view;
+static int s_proc_sort;
 static int s_batt_pct = -1;
 
 static lv_obj_t *s_scr;
@@ -129,6 +141,22 @@ static lv_obj_t *s_rxf_val;
 static lv_obj_t *s_txf_val;
 static lv_obj_t *s_devbatt_val;
 
+static lv_obj_t *s_gpu_arc;
+static lv_obj_t *s_gpu_util_val;
+static lv_obj_t *s_gpu_name_val;
+static lv_obj_t *s_gpu_vram_val;
+static lv_obj_t *s_gpu_temp_val;
+static lv_obj_t *s_gpu_fan_val;
+static lv_obj_t *s_gpu_pwr_val;
+
+static lv_obj_t *s_proc_sort_val;
+static lv_obj_t *s_proc_name[PCMON_PROC_ROWS];
+static lv_obj_t *s_proc_cpu[PCMON_PROC_ROWS];
+static lv_obj_t *s_proc_mem[PCMON_PROC_ROWS];
+static lv_obj_t *s_port_hdr_val;
+static lv_obj_t *s_port_num[PCMON_PORT_ROWS];
+static lv_obj_t *s_port_proc[PCMON_PORT_ROWS];
+
 static uint32_t level_color(int level)
 {
     if (level >= 2) {
@@ -170,6 +198,19 @@ static void fmt_uptime(long sec, char *buf, size_t n)
     long m = (sec % 3600) / 60;
     long s = sec % 60;
     snprintf(buf, n, "%ldd %02ld:%02ld:%02ld", d, h, m, s);
+}
+
+// Formats a label through newlib's snprintf. LVGL's own sprintf is built without
+// float support (CONFIG_LV_USE_FLOAT is off), so "%f" in lv_label_set_text_fmt
+// renders as garbage; going through snprintf keeps float fields correct.
+static void label_printf(lv_obj_t *lbl, const char *fmt, ...)
+{
+    char buf[48];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    lv_label_set_text(lbl, buf);
 }
 
 static lv_obj_t *make_label(lv_obj_t *parent, const char *text,
@@ -386,6 +427,26 @@ static void build_sys(lv_obj_t *p)
     s_uptime_val = put_label(p, "--", 14, 222, &lv_font_montserrat_20, C_TEXT);
 }
 
+static void build_gpu(lv_obj_t *p)
+{
+    s_gpu_arc = make_arc(p, 50, 4, 136, C_CYAN);
+    s_gpu_util_val = make_label(s_gpu_arc, "--", &lv_font_montserrat_40, C_TEXT);
+    lv_obj_align(s_gpu_util_val, LV_ALIGN_CENTER, 0, -6);
+    lv_obj_t *sub = make_label(s_gpu_arc, "GPU", &lv_font_montserrat_14, C_MUTED);
+    lv_obj_align(sub, LV_ALIGN_CENTER, 0, 26);
+
+    s_gpu_name_val = put_label(p, "--", 12, 146, &lv_font_montserrat_14, C_CYAN);
+    s_gpu_vram_val = put_label(p, "VRAM -- / -- MB", 12, 168, &lv_font_montserrat_20,
+                               C_TEXT);
+
+    put_label(p, "TEMP", 12, 206, &lv_font_montserrat_14, C_MUTED);
+    s_gpu_temp_val = put_label(p, "--", 12, 222, &lv_font_montserrat_20, C_AMBER);
+    put_label(p, "FAN", 90, 206, &lv_font_montserrat_14, C_MUTED);
+    s_gpu_fan_val = put_label(p, "--", 90, 222, &lv_font_montserrat_20, C_CYAN);
+    put_label(p, "PWR", 168, 206, &lv_font_montserrat_14, C_MUTED);
+    s_gpu_pwr_val = put_label(p, "--", 168, 222, &lv_font_montserrat_20, C_GREEN);
+}
+
 static void build_agent(lv_obj_t *p)
 {
     put_label(p, "HOST AGENT", 14, 4, &lv_font_montserrat_14, C_MUTED);
@@ -406,6 +467,38 @@ static void build_agent(lv_obj_t *p)
 
     put_label(p, "run tools/pc_status_bridge.py", 14, 244, &lv_font_montserrat_14,
               C_DIM);
+}
+
+static void build_proc(lv_obj_t *p)
+{
+    put_label(p, "TOP PROCESS", 14, 4, &lv_font_montserrat_14, C_MUTED);
+    s_proc_sort_val = put_label(p, "BY CPU", 150, 4, &lv_font_montserrat_14, C_CYAN);
+
+    put_label(p, "NAME", 12, 26, &lv_font_montserrat_14, C_DIM);
+    put_label(p, "CPU", 150, 26, &lv_font_montserrat_14, C_DIM);
+    put_label(p, "MEM", 196, 26, &lv_font_montserrat_14, C_DIM);
+
+    for (int i = 0; i < PCMON_PROC_ROWS; i++) {
+        int y = 48 + i * 26;
+        s_proc_name[i] = put_label(p, "--", 12, y, &lv_font_montserrat_14, C_TEXT);
+        s_proc_cpu[i] = put_label(p, "--", 150, y, &lv_font_montserrat_14, C_CYAN);
+        s_proc_mem[i] = put_label(p, "--", 196, y, &lv_font_montserrat_14, C_GREEN);
+    }
+}
+
+static void build_port(lv_obj_t *p)
+{
+    put_label(p, "LISTEN PORTS", 14, 4, &lv_font_montserrat_14, C_MUTED);
+    s_port_hdr_val = put_label(p, "EST --", 148, 4, &lv_font_montserrat_14, C_CYAN);
+
+    put_label(p, "PORT", 12, 26, &lv_font_montserrat_14, C_DIM);
+    put_label(p, "PROCESS", 90, 26, &lv_font_montserrat_14, C_DIM);
+
+    for (int i = 0; i < PCMON_PORT_ROWS; i++) {
+        int y = 48 + i * 26;
+        s_port_num[i] = put_label(p, "--", 12, y, &lv_font_montserrat_14, C_TEXT);
+        s_port_proc[i] = put_label(p, "--", 90, y, &lv_font_montserrat_14, C_CYAN);
+    }
 }
 
 static void build_ui(void)
@@ -463,7 +556,10 @@ static void build_ui(void)
     build_net(s_page[4]);
     build_trend(s_page[5]);
     build_sys(s_page[6]);
-    build_agent(s_page[7]);
+    build_gpu(s_page[7]);
+    build_proc(s_page[8]);
+    build_port(s_page[9]);
+    build_agent(s_page[10]);
 
     s_hint = put_label(s_scr, "UP/DN page  OK:req  HOLD:pause", 12, 298,
                        &lv_font_montserrat_14, C_MUTED);
@@ -577,8 +673,8 @@ static void render_mem(void)
     }
 
     if (s_stats.has_mem_detail) {
-        lv_label_set_text_fmt(s_mem_detail_val, "%.1f / %.1f GB",
-                              (double)s_stats.mem_used_gb, (double)s_stats.mem_total_gb);
+        label_printf(s_mem_detail_val, "%.1f / %.1f GB",
+                     (double)s_stats.mem_used_gb, (double)s_stats.mem_total_gb);
     } else {
         lv_label_set_text(s_mem_detail_val, "-- / -- GB");
     }
@@ -587,8 +683,8 @@ static void render_mem(void)
         int v = clamp100(s_stats.swap_pct);
         lv_bar_set_value(s_swap_bar, v, LV_ANIM_OFF);
         lv_label_set_text_fmt(s_swap_val, "%d%%", v);
-        lv_label_set_text_fmt(s_swap_detail_val, "%.1f / %.1f GB",
-                              (double)s_stats.swap_used_gb, (double)s_stats.swap_total_gb);
+        label_printf(s_swap_detail_val, "%.1f / %.1f GB",
+                     (double)s_stats.swap_used_gb, (double)s_stats.swap_total_gb);
     } else {
         lv_bar_set_value(s_swap_bar, 0, LV_ANIM_OFF);
         lv_label_set_text(s_swap_val, "--");
@@ -612,15 +708,15 @@ static void render_disk(void)
     }
 
     if (s_stats.has_disk_detail) {
-        lv_label_set_text_fmt(s_disk_detail_val, "%.1f / %.1f GB",
-                              (double)s_stats.disk_used_gb, (double)s_stats.disk_total_gb);
+        label_printf(s_disk_detail_val, "%.1f / %.1f GB",
+                     (double)s_stats.disk_used_gb, (double)s_stats.disk_total_gb);
     } else {
         lv_label_set_text(s_disk_detail_val, "-- / -- GB");
     }
 
     if (s_stats.has_disk_io) {
-        lv_label_set_text_fmt(s_read_val, "%.2f MB/s", (double)s_stats.disk_read_mbs);
-        lv_label_set_text_fmt(s_write_val, "%.2f MB/s", (double)s_stats.disk_write_mbs);
+        label_printf(s_read_val, "%.2f MB/s", (double)s_stats.disk_read_mbs);
+        label_printf(s_write_val, "%.2f MB/s", (double)s_stats.disk_write_mbs);
     } else {
         lv_label_set_text(s_read_val, "-- MB/s");
         lv_label_set_text(s_write_val, "-- MB/s");
@@ -641,8 +737,8 @@ static void render_net(void)
     }
 
     if (s_stats.has_net_total) {
-        lv_label_set_text_fmt(s_rx_val, "%.1f MB", (double)s_stats.net_recv_mb);
-        lv_label_set_text_fmt(s_tx_val, "%.1f MB", (double)s_stats.net_sent_mb);
+        label_printf(s_rx_val, "%.1f MB", (double)s_stats.net_recv_mb);
+        label_printf(s_tx_val, "%.1f MB", (double)s_stats.net_sent_mb);
     } else {
         lv_label_set_text(s_rx_val, "-- MB");
         lv_label_set_text(s_tx_val, "-- MB");
@@ -735,6 +831,110 @@ static void render_agent(void)
     }
 }
 
+static void render_gpu(void)
+{
+    if (!s_gpu.valid || !s_gpu.present) {
+        lv_arc_set_value(s_gpu_arc, 0);
+        lv_label_set_text(s_gpu_util_val, "--");
+        lv_obj_set_style_text_color(s_gpu_util_val, lv_color_hex(C_TEXT), 0);
+        lv_label_set_text(s_gpu_name_val, s_gpu.valid ? "NO GPU" : "--");
+        lv_label_set_text(s_gpu_vram_val, "VRAM -- / -- MB");
+        lv_label_set_text(s_gpu_temp_val, "--");
+        lv_label_set_text(s_gpu_fan_val, "--");
+        lv_label_set_text(s_gpu_pwr_val, "--");
+        return;
+    }
+
+    if (s_gpu.has_util) {
+        int v = clamp100(s_gpu.util);
+        lv_arc_set_value(s_gpu_arc, v);
+        uint32_t c = level_color(pcmon_level((float)v));
+        lv_obj_set_style_arc_color(s_gpu_arc, lv_color_hex(c), LV_PART_INDICATOR);
+        lv_label_set_text_fmt(s_gpu_util_val, "%d", v);
+        lv_obj_set_style_text_color(s_gpu_util_val, lv_color_hex(c), 0);
+    } else {
+        lv_arc_set_value(s_gpu_arc, 0);
+        lv_label_set_text(s_gpu_util_val, "--");
+        lv_obj_set_style_text_color(s_gpu_util_val, lv_color_hex(C_TEXT), 0);
+    }
+
+    set_text_clipped(s_gpu_name_val, s_gpu.name, 30);
+
+    if (s_gpu.has_vram) {
+        label_printf(s_gpu_vram_val, "VRAM %.0f / %.0f MB",
+                     (double)s_gpu.vram_used_mb, (double)s_gpu.vram_total_mb);
+    } else {
+        lv_label_set_text(s_gpu_vram_val, "VRAM -- / -- MB");
+    }
+
+    if (s_gpu.has_temp) {
+        label_printf(s_gpu_temp_val, "%dC", (int)(s_gpu.temp + 0.5f));
+    } else {
+        lv_label_set_text(s_gpu_temp_val, "--");
+    }
+    if (s_gpu.has_fan) {
+        lv_label_set_text_fmt(s_gpu_fan_val, "%d%%", clamp100(s_gpu.fan));
+    } else {
+        lv_label_set_text(s_gpu_fan_val, "--");
+    }
+    if (s_gpu.has_power) {
+        label_printf(s_gpu_pwr_val, "%.0fW", (double)s_gpu.power);
+    } else {
+        lv_label_set_text(s_gpu_pwr_val, "--");
+    }
+}
+
+static void render_proc(void)
+{
+    lv_label_set_text(s_proc_sort_val, s_proc_sort == 1 ? "BY MEM" : "BY CPU");
+
+    int n = s_proc_list.valid ? s_proc_list.count : 0;
+    if (n > PCMON_PROC_ROWS) {
+        n = PCMON_PROC_ROWS;
+    }
+    for (int i = 0; i < PCMON_PROC_ROWS; i++) {
+        if (i < n) {
+            set_text_clipped(s_proc_name[i], s_proc_list.items[i].name, 18);
+            label_printf(s_proc_cpu[i], "%.1f%%",
+                         (double)s_proc_list.items[i].cpu);
+            label_printf(s_proc_mem[i], "%.0fM",
+                         (double)s_proc_list.items[i].mem_mb);
+            lv_obj_set_style_text_color(s_proc_cpu[i],
+                                        lv_color_hex(level_color(pcmon_level(
+                                            s_proc_list.items[i].cpu))),
+                                        0);
+        } else {
+            lv_label_set_text(s_proc_name[i], "--");
+            lv_label_set_text(s_proc_cpu[i], "--");
+            lv_label_set_text(s_proc_mem[i], "--");
+            lv_obj_set_style_text_color(s_proc_cpu[i], lv_color_hex(C_CYAN), 0);
+        }
+    }
+}
+
+static void render_port(void)
+{
+    if (s_port_list.valid) {
+        lv_label_set_text_fmt(s_port_hdr_val, "EST %d", s_port_list.established);
+    } else {
+        lv_label_set_text(s_port_hdr_val, "EST --");
+    }
+
+    int n = s_port_list.valid ? s_port_list.count : 0;
+    if (n > PCMON_PORT_ROWS) {
+        n = PCMON_PORT_ROWS;
+    }
+    for (int i = 0; i < PCMON_PORT_ROWS; i++) {
+        if (i < n) {
+            lv_label_set_text_fmt(s_port_num[i], "%d", s_port_list.items[i].port);
+            set_text_clipped(s_port_proc[i], s_port_list.items[i].proc, 18);
+        } else {
+            lv_label_set_text(s_port_num[i], "--");
+            lv_label_set_text(s_port_proc[i], "--");
+        }
+    }
+}
+
 static void render(void)
 {
     if (!s_scr) {
@@ -770,8 +970,13 @@ static void render(void)
         lv_obj_set_style_text_color(s_batt_lbl, lv_color_hex(c), 0);
     }
 
-    lv_label_set_text(s_hint, s_paused ? "PAUSED  OK:req  HOLD:resume"
-                                       : "UP/DN page  OK:req  HOLD:pause");
+    if (s_paused) {
+        lv_label_set_text(s_hint, "PAUSED  OK:req  HOLD:resume");
+    } else if (s_view == PCMON_VIEW_PROC) {
+        lv_label_set_text(s_hint, "UP/DN page  OK:sort  HOLD:pause");
+    } else {
+        lv_label_set_text(s_hint, "UP/DN page  OK:req  HOLD:pause");
+    }
 
     render_core();
     render_cpu();
@@ -780,6 +985,9 @@ static void render(void)
     render_net();
     render_trend();
     render_sys();
+    render_gpu();
+    render_proc();
+    render_port();
     render_agent();
 }
 
@@ -820,8 +1028,16 @@ static void on_btn(bsp_btn_t btn, bsp_btn_ev_t bev, void *user)
 
 static void request_now(void)
 {
-    char req[16];
-    if (pcmon_format_request(req, sizeof(req)) > 0) {
+    const char *need = NULL;
+    if (s_view == PCMON_VIEW_GPU) {
+        need = PCMON_NEED_GPU;
+    } else if (s_view == PCMON_VIEW_PROC) {
+        need = PCMON_NEED_PROC;
+    } else if (s_view == PCMON_VIEW_PORT) {
+        need = PCMON_NEED_PORT;
+    }
+    char req[40];
+    if (pcmon_format_request(req, sizeof(req), need, s_proc_sort) > 0) {
         pcmon_link_send(req);
         s_tx_frames++;
     }
@@ -834,6 +1050,27 @@ static bool handle_event(const pcmon_ev_t *ev)
         if (pcmon_parse_agent(ev->line, &agent)) {
             s_agent = agent;
             s_last_agent_ms = esp_timer_get_time() / 1000;
+            return true;
+        }
+
+        pcmon_gpu_t gpu;
+        if (pcmon_parse_gpu(ev->line, &gpu)) {
+            s_gpu = gpu;
+            s_rx_frames++;
+            return true;
+        }
+
+        pcmon_proc_list_t procs;
+        if (pcmon_parse_proc_list(ev->line, &procs)) {
+            s_proc_list = procs;
+            s_rx_frames++;
+            return true;
+        }
+
+        pcmon_port_list_t ports;
+        if (pcmon_parse_port_list(ev->line, &ports)) {
+            s_port_list = ports;
+            s_rx_frames++;
             return true;
         }
 
@@ -864,6 +1101,9 @@ static bool handle_event(const pcmon_ev_t *ev)
             return true;
         }
         if (ev->btn == BSP_BTN_OK) {
+            if (s_view == PCMON_VIEW_PROC) {
+                s_proc_sort = s_proc_sort ? 0 : 1;
+            }
             request_now();
             return true;
         }
@@ -916,6 +1156,10 @@ bool app_pcmon_start(void)
 {
     pcmon_stats_reset(&s_stats);
     memset(&s_agent, 0, sizeof(s_agent));
+    pcmon_proc_list_reset(&s_proc_list);
+    pcmon_port_list_reset(&s_port_list);
+    pcmon_gpu_reset(&s_gpu);
+    s_proc_sort = 0;
     s_last_rx_ms = esp_timer_get_time() / 1000;
     s_last_agent_ms = s_last_rx_ms;
 

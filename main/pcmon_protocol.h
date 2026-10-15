@@ -10,7 +10,19 @@
 #define PCMON_CORES_MAX 8
 #define PCMON_LINE_MAX 512
 
-#define PCMON_PROTO_VER 2
+#define PCMON_PROC_MAX 8
+#define PCMON_PROC_NAME_MAX 20
+#define PCMON_PORT_MAX 8
+#define PCMON_PORT_PROC_MAX 20
+
+#define PCMON_GPU_NAME_MAX 28
+#define PCMON_GPU_VENDOR_MAX 12
+
+#define PCMON_NEED_PROC "proc"
+#define PCMON_NEED_PORT "port"
+#define PCMON_NEED_GPU "gpu"
+
+#define PCMON_PROTO_VER 4
 
 typedef struct {
     bool valid;
@@ -79,16 +91,79 @@ typedef struct {
     bool psutil;
 } pcmon_agent_t;
 
+typedef struct {
+    char name[PCMON_PROC_NAME_MAX];
+    float cpu;    // percent of all cores (Task Manager style)
+    float mem_mb; // resident memory in megabytes
+} pcmon_proc_t;
+
+typedef struct {
+    bool valid;
+    int sort; // 0 = by CPU, 1 = by memory
+    int count;
+    pcmon_proc_t items[PCMON_PROC_MAX];
+} pcmon_proc_list_t;
+
+typedef struct {
+    int port;
+    char proc[PCMON_PORT_PROC_MAX];
+} pcmon_port_t;
+
+typedef struct {
+    bool valid;
+    int count;
+    int established; // number of non-listening established connections
+    pcmon_port_t items[PCMON_PORT_MAX];
+} pcmon_port_list_t;
+
+typedef struct {
+    bool valid;
+    bool present; // a GPU was reported (name or vendor non-empty)
+    char vendor[PCMON_GPU_VENDOR_MAX];
+    char name[PCMON_GPU_NAME_MAX];
+    bool has_util;
+    float util; // percent
+    bool has_vram;
+    float vram_used_mb;
+    float vram_total_mb;
+    bool has_temp;
+    float temp;
+    bool has_fan;
+    float fan; // percent
+    bool has_power;
+    float power; // watts
+} pcmon_gpu_t;
+
 void pcmon_stats_reset(pcmon_stats_t *stats);
+
+void pcmon_proc_list_reset(pcmon_proc_list_t *list);
+
+void pcmon_port_list_reset(pcmon_port_list_t *list);
+
+void pcmon_gpu_reset(pcmon_gpu_t *gpu);
 
 bool pcmon_parse_status(const char *frame, pcmon_stats_t *out);
 
 bool pcmon_parse_agent(const char *frame, pcmon_agent_t *out);
 
-int pcmon_format_request(char *out, size_t n);
+bool pcmon_parse_proc_list(const char *frame, pcmon_proc_list_t *out);
+
+bool pcmon_parse_port_list(const char *frame, pcmon_port_list_t *out);
+
+bool pcmon_parse_gpu(const char *frame, pcmon_gpu_t *out);
+
+// need is NULL for a plain request, otherwise PCMON_NEED_PROC / PCMON_NEED_PORT /
+// PCMON_NEED_GPU.
+int pcmon_format_request(char *out, size_t n, const char *need, int sort);
 
 int pcmon_format_status(const pcmon_stats_t *stats, char *out, size_t n);
 
 int pcmon_format_agent(int psutil, char *out, size_t n);
+
+int pcmon_format_proc_list(const pcmon_proc_list_t *list, char *out, size_t n);
+
+int pcmon_format_port_list(const pcmon_port_list_t *list, char *out, size_t n);
+
+int pcmon_format_gpu(const pcmon_gpu_t *gpu, char *out, size_t n);
 
 int pcmon_level(float percent);

@@ -7,8 +7,17 @@ port and answers each request with a status frame::
 
     $PCSTAT,cpu=..,ccnt=..,c0=..,...,mem=..,mused=..,mtotal=..,..,host=..,os=..#\\n
 
-It also announces itself with ``$PCAGENT,ver=2,psutil=1#`` on connect (and
+It also announces itself with ``$PCAGENT,ver=4,psutil=1#`` on connect (and
 periodically) so the device can show whether the host agent is running.
+
+When the device is showing the process, port, or GPU page it appends
+``need=proc``, ``need=port``, or ``need=gpu`` (plus ``sort=0|1`` for the process
+page) to its request; the bridge then also answers with a top-N process list
+(``$PCPROC,...``), a listening-port list (``$PCPORT,...``), or a GPU summary
+(``$PCGPU,...``). Plain requests get the status frame only.
+
+NVIDIA GPUs are read through ``nvidia-smi`` (no extra dependency); when it is
+absent the adapter name is read from WMI so the model is still shown.
 
 Usage:
     pip install pyserial psutil
@@ -28,7 +37,10 @@ from __future__ import annotations
 import argparse
 import getpass
 import platform
+import re
+import shutil
 import socket
+import subprocess
 import sys
 import time
 
@@ -45,14 +57,43 @@ except ImportError:  # pragma: no cover
     psutil = None
 
 ESP_VID = 0x303A
-PROTO_VER = 2
+PROTO_VER = 4
 PCMON_MAX_FIELD = 31
 PCMON_CORES_MAX = 8
+PCMON_PROC_MAX = 8
+PCMON_PORT_MAX = 8
+PCMON_NAME_MAX = 19  # PCMON_PROC_NAME_MAX minus the terminating NUL
+PCMON_GPU_NAME_MAX = 27  # PCMON_GPU_NAME_MAX minus the terminating NUL
 AGENT_PERIOD_S = 5.0
 
 
-def sanitize(text: str) -> str:
-    return text.replace(",", "_").replace("#", "_").strip()[:PCMON_MAX_FIELD]
+def sanitize(text: str, limit: int = PCMON_MAX_FIELD) -> str:
+    return (
+        text.replace(",", "_")
+        .replace("#", "_")
+        .replace("=", "_")
+        .strip()[:limit]
+    )
+
+
+_NEED_RE = re.compile(r"need=(proc|port|gpu)")
+_SORT_RE = re.compile(r"sort=(\d)")
+
+
+def parse_request(line: bytes) -> tuple[str | None, int] | None:
+    """Return (need, sort) for a request frame, or None if it is not one.
+
+    A plain ``$REQ#`` yields ``(None, 0)``; a list request carries the extra
+    ``need=proc|port|gpu`` and ``sort=0|1`` tokens.
+    """
+    if b"$REQ" not in line:
+        return None
+    text = line.decode("ascii", "ignore")
+    need_match = _NEED_RE.search(text)
+    sort_match = _SORT_RE.search(text)
+    need = need_match.group(1) if need_match else None
+    sort = int(sort_match.group(1)) if sort_match else 0
+    return need, sort
 
 
 class PortUnavailable(Exception):
@@ -106,6 +147,117 @@ def _current_user() -> str:
         return ""
 
 
+class GpuSampler:
+    """Collect GPU metrics.
+
+    NVIDIA cards are read through ``nvidia-smi`` (shipped with the driver, no
+    extra dependency): utilization, VRAM, temperature, fan, and power. When no
+    NVIDIA tool is present the adapter name is read from WMI so at least the
+    model is shown. Queried only while the device displays the GPU page.
+    """
+
+    _NVIDIA_QUERY = (
+        "name,utilization.gpu,memory.used,memory.total,"
+        "temperature.gpu,fan.speed,power.draw"
+    )
+    _UNKNOWN = {"", "n/a", "[not supported]", "[n/a]", "unknown", "none"}
+
+    def __init__(self) -> None:
+        self._fallback_name: str | None = None
+        self._fallback_checked = False
+
+    @staticmethod
+    def _num(text: str) -> float | None:
+        text = text.strip()
+        if text.lower() in GpuSampler._UNKNOWN:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            return None
+
+    def _nvidia(self) -> list[tuple[str, str]] | None:
+        exe = shutil.which("nvidia-smi")
+        if not exe:
+            return None
+        try:
+            result = subprocess.run(
+                [exe, f"--query-gpu={self._NVIDIA_QUERY}", "--format=csv,noheader,nounits"],
+                capture_output=True,
+                text=True,
+                timeout=4,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if result.returncode != 0:
+            return None
+        lines = result.stdout.strip().splitlines()
+        if not lines:
+            return None
+        parts = [part.strip() for part in lines[0].split(",")]
+        if len(parts) < 7:
+            return None
+
+        fields: list[tuple[str, str]] = [
+            ("v", "nvidia"),
+            ("n", sanitize(parts[0], PCMON_GPU_NAME_MAX)),
+        ]
+        util = self._num(parts[1])
+        if util is not None:
+            fields.append(("u", f"{util:.1f}"))
+        used = self._num(parts[2])
+        total = self._num(parts[3])
+        if total is not None:
+            fields.append(("mu", f"{(used or 0.0):.0f}"))
+            fields.append(("mt", f"{total:.0f}"))
+        temp = self._num(parts[4])
+        if temp is not None:
+            fields.append(("t", f"{temp:.1f}"))
+        fan = self._num(parts[5])
+        if fan is not None:
+            fields.append(("fn", f"{fan:.0f}"))
+        power = self._num(parts[6])
+        if power is not None:
+            fields.append(("pw", f"{power:.1f}"))
+        return fields
+
+    def _wmi_name(self) -> str | None:
+        if self._fallback_checked:
+            return self._fallback_name
+        self._fallback_checked = True
+        if platform.system() != "Windows":
+            return None
+        script = (
+            "(Get-CimInstance Win32_VideoController | "
+            "Where-Object { $_.AdapterRAM -gt 0 } | "
+            "Sort-Object AdapterRAM -Descending | "
+            "Select-Object -First 1).Name"
+        )
+        try:
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", script],
+                capture_output=True,
+                text=True,
+                timeout=8,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        lines = result.stdout.strip().splitlines()
+        if not lines:
+            return None
+        self._fallback_name = lines[0].strip() or None
+        return self._fallback_name
+
+    def sample(self) -> list[tuple[str, str]]:
+        fields = self._nvidia()
+        if fields is not None:
+            return fields
+        name = self._wmi_name()
+        if not name:
+            return [("v", ""), ("n", "")]
+        return [("v", "other"), ("n", sanitize(name, PCMON_GPU_NAME_MAX))]
+
+
 class Sampler:
     def __init__(self) -> None:
         self._last_net = None
@@ -116,6 +268,24 @@ class Sampler:
         self.os_name = sanitize(f"{platform.system()} {platform.release()}")
         self.user = sanitize(_current_user())
         self.cpu_model = sanitize(_cpu_model())
+        self.gpu = GpuSampler()
+        self._prime_process_cpu()
+
+    def _prime_process_cpu(self) -> None:
+        """Seed per-process CPU counters so the first sample is meaningful."""
+        if psutil is None:
+            return
+        try:
+            procs = list(psutil.process_iter(["pid"]))
+        except Exception:
+            return
+        for proc in procs:
+            try:
+                proc.cpu_percent(None)
+            except Exception:
+                pass
+        if procs:
+            time.sleep(0.1)
 
     def _net_rates(self) -> tuple[float, float] | None:
         counters = psutil.net_io_counters()
@@ -237,6 +407,86 @@ class Sampler:
                     return float(entry.current)
         return None
 
+    def top_processes(self, sort: int = 0) -> list[tuple[str, float, float]]:
+        """Return up to PCMON_PROC_MAX (name, cpu%, mem_MB) rows.
+
+        CPU is normalized by the core count so values resemble Windows Task
+        Manager instead of the raw per-core sum. The idle process (pid 0) is
+        skipped because it otherwise always dominates.
+        """
+        if psutil is None:
+            return []
+        ncpu = psutil.cpu_count() or 1
+        rows: list[tuple[str, float, float]] = []
+        try:
+            iterator = psutil.process_iter(
+                ["pid", "name", "cpu_percent", "memory_info"]
+            )
+        except Exception:
+            return []
+        for proc in iterator:
+            try:
+                info = proc.info
+                pid = info.get("pid")
+                if pid == 0:
+                    continue
+                cpu = (info.get("cpu_percent") or 0.0) / ncpu
+                meminfo = info.get("memory_info")
+                mem_mb = (meminfo.rss / (1024 * 1024)) if meminfo else 0.0
+                name = info.get("name") or f"pid{pid}"
+                rows.append((name, cpu, mem_mb))
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        if sort == 1:
+            rows.sort(key=lambda row: row[2], reverse=True)
+        else:
+            rows.sort(key=lambda row: row[1], reverse=True)
+        return rows[:PCMON_PROC_MAX]
+
+    def listen_ports(self) -> tuple[list[tuple[int, str]], int]:
+        """Return (listening ports, established count).
+
+        Each entry is (port, owning-process-name). Connections whose owning
+        process cannot be resolved fall back to the PID or '?'.
+        """
+        if psutil is None:
+            return [], 0
+        try:
+            conns = psutil.net_connections(kind="inet")
+        except (psutil.AccessDenied, OSError):
+            return [], 0
+
+        established = 0
+        by_port: dict[int, int | None] = {}
+        for conn in conns:
+            status = conn.status
+            if status == "ESTABLISHED":
+                established += 1
+            elif status == "LISTEN" and conn.laddr:
+                by_port.setdefault(conn.laddr.port, conn.pid)
+
+        names: dict[int, str] = {}
+        items: list[tuple[int, str]] = []
+        for port in sorted(by_port):
+            pid = by_port[port]
+            if pid is None:
+                name = "?"
+            else:
+                if pid not in names:
+                    names[pid] = self._process_name(pid)
+                name = names[pid]
+            items.append((port, name))
+            if len(items) >= PCMON_PORT_MAX:
+                break
+        return items, established
+
+    @staticmethod
+    def _process_name(pid: int) -> str:
+        try:
+            return psutil.Process(pid).name()
+        except Exception:
+            return f"pid{pid}"
+
 
 def build_frame(fields: list[tuple[str, str]]) -> bytes:
     body = ",".join(f"{key}={value}" for key, value in fields)
@@ -248,19 +498,57 @@ def build_agent_frame() -> bytes:
     return f"$PCAGENT,ver={PROTO_VER},psutil={psutil_flag}#\n".encode("ascii")
 
 
+def build_proc_frame(rows: list[tuple[str, float, float]], sort: int) -> bytes:
+    fields = [("by", str(sort)), ("cnt", str(len(rows)))]
+    for index, (name, cpu, mem_mb) in enumerate(rows):
+        fields.append((f"p{index}", sanitize(name, PCMON_NAME_MAX)))
+        fields.append((f"u{index}", f"{cpu:.1f}"))
+        fields.append((f"m{index}", f"{mem_mb:.0f}"))
+    body = ",".join(f"{key}={value}" for key, value in fields)
+    return f"$PCPROC,{body}#\n".encode("ascii", errors="ignore")
+
+
+def build_port_frame(items: list[tuple[int, str]], established: int) -> bytes:
+    fields = [("cnt", str(len(items))), ("est", str(established))]
+    for index, (port, name) in enumerate(items):
+        fields.append((f"t{index}", str(port)))
+        fields.append((f"n{index}", sanitize(name, PCMON_NAME_MAX)))
+    body = ",".join(f"{key}={value}" for key, value in fields)
+    return f"$PCPORT,{body}#\n".encode("ascii", errors="ignore")
+
+
+def build_gpu_frame(fields: list[tuple[str, str]]) -> bytes:
+    body = ",".join(f"{key}={value}" for key, value in fields)
+    return f"$PCGPU,{body}#\n".encode("ascii", errors="ignore")
+
+
+def answer(sampler: Sampler, need: str | None, sort: int) -> bytes:
+    payload = bytearray(build_frame(sampler.sample()))
+    if need == "proc":
+        payload += build_proc_frame(sampler.top_processes(sort), sort)
+    elif need == "port":
+        items, established = sampler.listen_ports()
+        payload += build_port_frame(items, established)
+    elif need == "gpu":
+        payload += build_gpu_frame(sampler.gpu.sample())
+    return bytes(payload)
+
+
 def serve(port: str, sampler: Sampler) -> None:
     """Answer requests until the link drops (raises serial.SerialException)."""
     print(f"Connecting to {port} ...", file=sys.stderr)
     with serial.Serial(port, 115200, timeout=0.5) as ser:
-        print("Connected. Answering $REQ# frames.", file=sys.stderr)
+        print("Connected. Answering request frames.", file=sys.stderr)
         ser.write(build_agent_frame())
         ser.write(build_frame(sampler.sample()))
         last_agent = time.monotonic()
         while True:
             line = ser.readline()
             now = time.monotonic()
-            if line and b"$REQ#" in line:
-                ser.write(build_frame(sampler.sample()))
+            request = parse_request(line)
+            if request is not None:
+                need, sort = request
+                ser.write(answer(sampler, need, sort))
             elif now - last_agent >= AGENT_PERIOD_S:
                 ser.write(build_agent_frame())
                 last_agent = now
